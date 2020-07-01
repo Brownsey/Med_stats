@@ -1,0 +1,213 @@
+---
+title: "Medical Statistics Assignment 2"
+author: "Stephen Brownsey"
+output: pdf_document
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+xfun::session_info('rmarkdown')
+```
+
+
+```{r libraries, include=FALSE}
+library(survival)
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(broom)
+```
+
+## Question 1:
+The plots in this section will be used to visualise the mgus data from a couple of different perspectives, each of which will be coloured by sex to demonstrate the slight differences between genders.
+
+```{r}
+#Load the mgus data
+data(mgus)
+head(mgus)
+#Data points showing Days till last follow up against subject ID, coloured by Sex
+mgus %>%
+  ggplot() +
+  geom_point(aes(x = id, y = futime, col = sex)) +
+  theme_bw() +
+  labs(y = "Days from diagnosis to last follow-up",
+       x = "Subject ID", title = "Days VS Subject ID")
+#Histogram demonstrating the distribution of the ages by gender.
+mgus %>%
+  ggplot() +
+  geom_histogram(aes(age, fill = sex), col = "black") +
+  theme_bw() +
+  ggtitle("Histogram showing Age Distribution by Gender")
+#Density plot to show distributions of
+mgus %>%
+  ggplot() +
+  geom_density(aes(futime, fill = sex), alpha = 0.5, col = "black") +
+  theme_bw() +
+  ggtitle("Density showing Time till Last Follow-up Distribution by Gender") + 
+  labs(y = "Density", x = "Days from Diagnosis to Last Follow-up",
+       title = "Days to Last Follow-up Density Graph")
+```
+
+## Question 2:
+The Kaplan-Meier Estimator is a non-parametric statistic used to estimate the survival function from lifetime data. As seen in lectures, the estimator was given in two formats: 
+Under the assumption that there are no ties then estimator can be denoted as: 
+$$
+\hat{s}(t) = \prod_{i=y_i \leq t}\left(\frac{n - i}{n-i+1}\right)^{\delta(i)}$$
+If there are ties then it can be denoted as: 
+$$\hat{s}(t) = \prod_{i=y_i \leq t}\left(1 -\frac{d_i}{n_i}\right)^{\delta(i)}$$
+Where $n_i$ denotes the number of subjects at beginning of time point $I_i$, $d_i$ denotes the number of deaths that occur in $I_i$, $T_i$ denotes the time of death for observation i, $C_i$ denotes the censoring and $\delta_i$ is the indicator function that both $T_i$ and $C_i$ occur $\delta_i =1(T_i , C_i)$
+
+The plot, as seen below, is a series of decreasing horizontal steps which, with a sufficiently large sample size approaches the true survival rate of the population.
+```{r}
+km_fit = survfit(Surv(futime, death) ~ 1, data = mgus)
+plot(km_fit, main="Survival functon of mgus data", 
+     xlab = "Days from diagnosis to last follow-up", ylab = "Survival Proportion")
+```
+
+## Question 3:
+
+The first step to solving this problem is to see whether are ties in the data:
+```{r}
+#The first step is to check whether there are any ties:
+n_occur <- data.frame(table(mgus$futime)) %>%
+  filter(Freq > 1) %>%
+  rename(futime = Var1)
+
+kable(n_occur, "latex", booktabs = T) %>%
+kable_styling(latex_options = "striped")
+```
+From this table it can be clearly seen that there are ties for four futime points, as such the code below needs to take into account that the number of deaths at any time point could be greater than 1.
+
+```{r}
+mgus3 <- mgus %>% 
+  select(futime, death) %>%
+  arrange(futime) %>%
+  unique() %>%
+  #Add in number of deaths at each futime step
+  mutate(death = if_else(futime %in% n_occur$futime, 2, 1))
+
+#Update the number of patients who are still alive at each futime step  
+risk <- c(241, rep(0, 236))
+for(i in 1:236) {
+  risk[i+ 1] <- risk[i] - mgus3[i, 2]
+}
+mgus3 <- cbind(mgus3, risk) %>%
+  #Calculate the sum variable
+  mutate(sum = death/(risk * (risk - death)))
+
+#Define The cummulant
+cummulant <- c(mgus3$sum[1], rep(0, 236))
+for(i in 1:236) {
+  #update cumulant with sum
+  cummulant[i+1] <- cummulant[i] + mgus3$sum[i+1]
+}
+
+mgus3 <- cbind(mgus3, cummulant)  %>%
+  #sqrt cummulant as required
+  mutate(cummulant = sqrt(cummulant)) %>% 
+  #Calculate pHat value
+  mutate(pHat = (1 - (1/risk))^death)
+
+#Calculate the sHat
+sHat <- c(mgus3$pHat[1], rep(0, 236))
+for(i in 1: 236) {
+  sHat[i+1] <- sHat[i]*mgus3$pHat[i+1]
+}
+
+mgus3 <- cbind(mgus3, sHat) %>%
+  #Calculate standard error
+  mutate(se = cummulant *sHat) %>%
+  #defining the 95% confidence interval between lower and upper
+  mutate(upper = sHat + 1.96 * se) %>%
+  mutate(lower = sHat - 1.96 * se) %>%
+  #Stop survival rate going over 1
+  mutate(upper = if_else(upper > 1 ,1 , upper)) %>%
+  #Stop the survival rate going below 0
+  mutate(lower = if_else(lower < 0 ,0, lower)) %>%
+  #Last observation has division by 0 so exclude
+  filter(futime != 14325) %>%
+  select(futime, sHat, lower, upper)
+
+mgus3 %>% 
+  ggplot(aes(x = futime)) +
+  geom_line(aes(y = sHat), col = "red") +
+  geom_line(aes(y = upper)) +
+  geom_line(aes(y = lower)) +
+  theme_bw() + 
+  labs(x = "Days from Diagnosis to Last Follow-up",
+       y = "Survival Proportion", title = "Own Code: Survival Functon of Mgus Data")
+```
+
+
+## Question 4:
+The hypothesis test undertaken will test for a difference between two survival curves using the G-rho family of tests. The idea being that if the null hypothesis is true then there is no difference between the two survival curves and therefore the two datasets contain survival data which originates from the same underlying population. On the contrary, if the alternative hypothesis is true, then there is statistically signicant evidence to suggest that since the two datasets have different survival curves then they come from different underlying populations. The test can be formulated as followed: 
+
+Null Hypothesis: $H0:$ There is no difference between the two survival curves.
+Alternative Hypothesis: $H1:$ There is a difference between the two survival curves.
+Test statistics: $T < 2\times 10^{-16}$
+Conclusion:  Since T < 0.05, there is sufficient evidence to reject the null hypothesis and accept the alternative hypothesis - there is a difference between the survival curves generated for the two datasets and the data in each dataset comes from different underlying populations.
+
+```{r}
+#It is worth noting that both datasets contain no null values for the futime or death variables
+mgus_data <- mgus %>%
+  select(futime, death) %>%
+  mutate(dataset = "mgus")
+mgus2_data <- mgus2 %>%
+  select(futime, death) %>%
+  mutate(dataset = "mgus2")  
+combined <- bind_rows(mgus_data, mgus2_data)
+
+survdiff(Surv(futime, death) ~ dataset, data = combined)
+```
+The outcome from this test is highly significant which demonstrates the difference between the two survival curves generated from the different datasets. This makes sense as there is a large difference in survival proportion between the two datasets. In the mgus data the observed proportion of deaths = `r round(225/241,3)` whereas in the mgus2 data is it = `r round(963/1384, 3)`.
+
+## Question 5
+There are a couple of observations about the data which need to be considered. Firstly, it is useful to check the number of NA values in each column to see whether these variables should be used for analysis:
+```{r}
+#checking NAs
+nulls <- apply(is.na(mgus), 2, sum)
+
+kable(t(nulls), "latex", booktabs = T) %>%
+kable_styling(latex_options = "striped")
+```
+
+A key observation here is that both pcdx and pctime contain 177 $NULL$ values out of a total of 241 observations. These variables are related and as such only one should be included in any model to reduce the risk associated with confounding variables. The pcdx variable gives the type of plasma cell malignancy if the subject progressed or $NA$ otherwise. This variable can be changed to a 0/1 indicator variable as to whether the person progressed, where 1 denotes they did and 0 denotes they did not.
+```{r}
+#Changing the pcdx variable
+cox_data <- mgus %>%
+  mutate(pcdx = if_else(is.na(pcdx), 0, 1))
+
+#Full model: Model1
+cox = coxph(
+  Surv(futime,death) ~ age + sex + dxyr + pcdx + alb + creat + hgb + mspike, data = cox_data)
+cox
+cox_fit = survfit(cox)
+
+#Best model in terms of LRT: Model2
+cox_2 = coxph(
+  Surv(futime,death) ~ age + sex + dxyr + pcdx  + creat + hgb, data = cox_data)
+cox_2
+cox_fit_2 = survfit(cox_2)
+
+#Testing to see confirm that pcdx is worth including: Model 3
+cox_3 = coxph(
+  Surv(futime,death) ~ age + sex + dxyr  + creat + hgb, data = cox_data)
+cox_3
+cox_fit_3 = survfit(cox_3)
+
+#All variables included in this model were significant (<0.05): Model 4
+cox_4 = coxph(
+  Surv(futime,death) ~ age + creat + hgb, data = cox_data)
+cox_4
+
+cox_fit_4 = survfit(cox_4)
+
+lrt_scores <- tibble(Model = c("Model 1: Full Model", "Model 2: High p-value variables removed", 
+                               "Model 3: pcdx removed aswell", "Model 4: Only significant variables"),
+                     LRT_Score = c(cox$score, cox_2$score, cox_3$score, cox_4$score))
+kable(lrt_scores, "latex", booktabs = T) %>%
+kable_styling(latex_options = "striped")
+```
+All the above models have a LRT value compared to the NULL model, since they are all being compared to the same NULL model, the best model will the one returning the highest Likelihood Ratio Test (LRT) score. From the models tested above it can be seen that model 2 returns the highest value for the LRT score and as such is the most best Cox regression model. This is interesting as not all the parameters in the model are statistically significant (p.value < 0.05), but they are very close to being significant. Adding in the binary variable pcdx for whether the the subject progressed to plasma cell malignancy, did increase the LRT and was a statistically significant contributing variable. The final Model can be denoted as: 
+$y =0.079age +0.294sexmale + 0.054 pcdx + 0.443 creat - 0.165 hgb$
